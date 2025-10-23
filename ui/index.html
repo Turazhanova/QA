@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Internal Q&A — Demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { font-family: ui-sans-serif, system-ui; }
+    body { margin: 0; background: #0b1020; color: #f2f5ff; }
+    .wrap { max-width: 900px; margin: 32px auto; padding: 0 16px; }
+    .intro { text-align: center; margin-bottom: 24px; }
+    .intro .desc { color: #b0b8d6; font-size: 15px; max-width: 700px; margin: 8px auto; }
+    .small { opacity: .85; font-size: 13px; }
+    .card { background: #111731; border-radius: 16px; padding: 16px; box-shadow: 0 8px 24px rgba(0,0,0,.35); }
+    .row { display: flex; gap: 8px; }
+    input, button { font: inherit; }
+    input[type="text"] { flex: 1; padding: 12px 14px; border-radius: 12px; border: 1px solid #233057; background: #0e1430; color: #e6ebff; }
+    button { padding: 12px 16px; border-radius: 12px; border: 0; background: #4f7cff; color: white; cursor: pointer; }
+    button.secondary { background: #36b37e; }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    .msg { margin-top: 16px; padding: 12px 14px; background:#0e1430; border:1px solid #243363; border-radius: 12px; }
+    .meta { margin-top:8px; display:flex; flex-wrap:wrap; gap:8px; }
+    .pill { display:inline-flex; align-items:center; gap:6px; border:1px solid #2a3a6a; background:#151d3d; border-radius: 999px; padding: 6px 10px; font-size:12px; color:#c8d3ff; }
+    .title { font-weight: 700; font-size: 20px; margin: 0 0 12px; }
+    details.preview { margin-top:8px; }
+    details.preview summary { cursor: pointer; }
+    .bar { display:flex; align-items:center; gap:8px; justify-content:space-between; margin-bottom:10px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="intro">
+      <h1>Internal Q&amp;A Assistant</h1>
+      <p class="desc">
+        Ask questions about your company documents — policies, HR forms, reports, or scanned files.
+        The assistant finds the most relevant files, uses AI to answer, and shows where each answer came from.
+      </p>
+      <div id="stats" class="small">Loading index info...</div>
+    </div>
+
+    <div class="card">
+      <div class="bar">
+        <div class="title">Ask the assistant</div>
+        <div>
+          <button id="reindex" class="secondary" title="Rebuild index from /data">Reindex files</button>
+        </div>
+      </div>
+      <div class="row">
+        <input id="q" type="text" placeholder="Ask: e.g., What is our refund policy?" />
+        <button id="ask">Ask</button>
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <input id="email" type="text" placeholder="your work email (optional)" />
+        <input id="topk" type="text" placeholder="top_k (default 6)" style="max-width:120px" />
+      </div>
+      <p class="small" style="opacity:.8;margin-top:8px;">
+        💡 Tips: “What is our refund policy?”, “Show HR contact details”, “How many PTO days do we have?”
+      </p>
+
+      <div id="chat"></div>
+    </div>
+  </div>
+
+  <script>
+    const API = "http://127.0.0.1:8000";
+    const chat = document.getElementById("chat");
+    const btn = document.getElementById("ask");
+    const q = document.getElementById("q");
+    const email = document.getElementById("email");
+    const topk = document.getElementById("topk");
+    const statsEl = document.getElementById("stats");
+    const reindexBtn = document.getElementById("reindex");
+    const history = [];
+
+    function escapeHtml(s){ return s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m])); }
+
+    function render() {
+      chat.innerHTML = history.map(item => `
+        <div class="msg">
+          <div><b>Q:</b> ${escapeHtml(item.q)}</div>
+          <div style="margin-top:6px; white-space:pre-wrap;"><b>A:</b> ${escapeHtml(item.a)}</div>
+
+          ${item.contexts?.length ? `
+            <details class="preview"><summary>Show matched snippets (${item.contexts.length})</summary>
+              <div class="meta" style="margin-top:8px;">
+                ${item.contexts
+                  .filter(c => c.source && c.chunk_id >= 0)
+                  .map(c => `
+                    <div style="margin-bottom:8px;">
+                      <span class="pill" title="score ${c.score}">${escapeHtml(c.source)} · chunk ${c.chunk_id}</span>
+                      <div class="small" style="margin-top:6px; white-space:pre-wrap;">${escapeHtml(c.preview || "")}</div>
+                    </div>
+                  `).join("")}
+              </div>
+            </details>` : ``}
+
+          ${item.citations?.length ? `
+            <div class="meta">
+              ${item.citations
+                .filter(c => c.source && c.chunk_id >= 0)
+                .map(c => `<span class="pill" title="score ${c.score}">${escapeHtml(c.source)} · chunk ${c.chunk_id}</span>`)
+                .join("")}
+            </div>` : ``}
+        </div>
+      `).join("");
+    }
+
+    async function ask() {
+      const question = q.value.trim();
+      if (!question) return;
+      btn.disabled = true;
+      try {
+        const payload = {
+          question,
+          user_email: email.value.trim() || null,
+          top_k: Number(topk.value) > 0 ? Number(topk.value) : undefined
+        };
+        const res = await fetch(`${API}/ask`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if(!res.ok){ throw new Error(data?.detail || res.statusText); }
+        history.unshift({ q: question, a: data.answer || "", citations: data.citations || [], contexts: data.contexts || [] });
+        q.value = "";
+        render();
+      } catch (e) {
+        history.unshift({ q: question, a: `Error: ${e.message}`, citations: [], contexts: [] });
+        render();
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    async function loadStats() {
+      try {
+        const res = await fetch(`${API}/health`);
+        const data = await res.json();
+        statsEl.textContent = data?.ok ? `Indexed files: ${data.files ?? 0}, chunks: ${data.chunks ?? 0}` : "Server offline";
+      } catch {
+        statsEl.textContent = "Server offline";
+      }
+    }
+
+    async function reindex() {
+      if (!confirm("Rebuild index from /data folder? This may take a minute.")) return;
+      try {
+        const res = await fetch(`${API}/reindex`, { method: "POST" });
+        if (res.ok) alert("Reindex started. Wait ~30s, then refresh stats.");
+        else alert("Failed to start reindex.");
+      } catch (e) {
+        alert("Error: " + e.message);
+      }
+    }
+
+    reindexBtn.addEventListener("click", reindex);
+    btn.addEventListener("click", ask);
+    q.addEventListener("keydown", (e) => { if (e.key === "Enter") ask(); });
+
+    render();
+    loadStats();
+    setInterval(loadStats, 5000);
+  </script>
+</body>
+</html>
